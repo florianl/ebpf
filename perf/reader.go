@@ -396,6 +396,45 @@ func (pr *Reader) ReadInto(rec *Record) error {
 	}
 }
 
+// DrainInto is like ReadInto except that it is non blocking.
+//
+// Returns io.EOF if no event can be read from all perf ringbuffers.
+func (pr *Reader) DrainInto(rec *Record) error {
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+
+	pr.pauseMu.Lock()
+	defer pr.pauseMu.Unlock()
+
+	if pr.overwritable && !pr.paused {
+		return errMustBePaused
+	}
+
+	if pr.rings == nil {
+		return fmt.Errorf("perf ringbuffer: %w", ErrClosed)
+	}
+
+	for _, ring := range pr.rings {
+		// Read the current head pointer now, not every time
+		// we read a record. This prevents a single fast producer
+		// from keeping the reader busy.
+		ring.loadHead()
+		err := pr.readRecordFromRing(rec, ring)
+		switch err {
+		case nil:
+			return nil
+		case errEOR:
+			// We've emptied the current ring buffer, process
+			// the next one.
+			continue
+		default:
+			return err
+
+		}
+	}
+	return io.EOF
+}
+
 // Pause stops all notifications from this Reader.
 //
 // While the Reader is paused, any attempts to write to the event buffer from

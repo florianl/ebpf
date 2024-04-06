@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"syscall"
@@ -527,6 +528,52 @@ func TestPerfReaderWakeupEvents(t *testing.T) {
 	for i := 0; i < numEvents; i++ {
 		checkRecord(t, rd)
 	}
+}
+
+func TestDrainInto(t *testing.T) {
+	events := perfEventArray(t)
+
+	numEvents := 5
+	// Set WakeupEvents to numEvents+1 to not trigger notification.
+	rd, err := NewReaderWithOptions(events, 4096, ReaderOptions{WakeupEvents: numEvents + 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rd.Close()
+
+	prog := outputSamplesProg(t, events, 5)
+
+	// Generate events.
+	for i := 0; i < numEvents; i++ {
+		ret, _, err := prog.Test(internal.EmptyBPFContext)
+		testutils.SkipIfNotSupported(t, err)
+		if err != nil || ret != 0 {
+			t.Fatal("Can't write sample")
+		}
+
+		if errno := syscall.Errno(-int32(ret)); errno != 0 {
+			t.Fatal("Expected 0 as return value, got", errno)
+		}
+	}
+
+	rd.SetDeadline(time.Now().Add(10 * time.Millisecond))
+	_, err = rd.Read()
+	qt.Assert(t, qt.ErrorIs(err, os.ErrDeadlineExceeded), qt.Commentf("expected os.ErrDeadlineExceeded"))
+
+	drained := 0
+	var rec Record
+	for {
+		err = rd.DrainInto(&rec)
+		qt.Assert(t, qt.IsNil(err))
+		drained++
+		if rec.Remaining == 0 {
+			break
+		}
+	}
+	qt.Assert(t, qt.Equals(numEvents, drained), qt.Commentf("expected %d but got %d", numEvents, drained))
+
+	err = rd.DrainInto(&rec)
+	qt.Assert(t, qt.ErrorIs(err, io.EOF), qt.Commentf("expected io.EOF"))
 }
 
 func BenchmarkReader(b *testing.B) {
